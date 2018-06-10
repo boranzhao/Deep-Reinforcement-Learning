@@ -1,4 +1,6 @@
-task= "train"
+task= "play"
+
+
 import gym
 from gym.wrappers import Monitor
 import matplotlib
@@ -22,10 +24,8 @@ if p not in sys.path:
 
 
 from collections import defaultdict,namedtuple
-# import lib.plotting as plotting
+from atari.helper import AtariEnvWrapper
 from lib import plotting
-from lib.atari.helper import AtariEnvWrapper
-# from lib import plotting
 from skimage import color, transform, exposure
 matplotlib.style.use('ggplot') # for emulating the aesthetics of ggplot (a popular plotting package for R).
 
@@ -35,7 +35,7 @@ env = gym.envs.make('Breakout-v4')
 # wrap the environment so that an episode is done when a life is lost, but the game is still reset after losing all lives
 env = AtariEnvWrapper(env) 
 
-# Atari Actions: 0 (noop), 1 (fire), 2 (left) and 3 right 
+# Atari Actions: 0 (noop), 1 (fire), 2 (right) and 3 (left) 
 VALID_ACTIONS = [0,1,2,3]
 
 class AtariProcessor():
@@ -54,16 +54,20 @@ class AtariProcessor():
     image = image.astype(np.uint8)           # convert to int 8 so that the replay_memory will not take too much space
     image = image.reshape(image.shape[0],image.shape[1],1)  # the shape (samples,rows,cols, channels) needed for Conv2D, the sample axis will be added later
     return image
-  # def process_state(self,image_color):
-  #   image = self.process_image(image_color)
-  #   return image.reshape(1,image.shape[0],image.shape[1],1)  # the shape (samples,rows,cols, channels) needed for Conv2D
 
-  # def reset_state(self,image_color):
-  #   """
-  #     Reset the state to be the stacks of four repetitions of the processed image_color
-  #   """
-  #   image = self.process_image(image_color)
-  #   self.state= np.stack([image]*self.frames, axis=2)
+  def make_next_state(self,state, next_image_color):
+    next_image = self.process_image(next_image_color)
+    next_state = np.append(state[:,:,1:],next_image,axis=2)  # state[:,:,0] corresponds to the oldest frame
+    return next_state
+
+
+  def make_initial_state(self,image_color):
+    """
+      Reset the state to be the stacks of four repetitions of the processed image_color
+    """
+    image = self.process_image(image_color)
+    state = np.squeeze(np.stack([image]*4,axis=2),axis=3)
+    return state
 
 
   # def update_state(self,image_color):
@@ -142,7 +146,7 @@ def copy_model_parameters(estimator1,estimator2):
 def deep_q_learing(env,
                   atari_processor,
                   q_estimator,
-                  num_games=100000,
+                  num_episodes=1000000,
                   replay_memory_size = 1000000, # default value in DQN paper 
                   replay_memory_init_size = 50000, # default value in DQN paper  
                   update_target_estimator_every=10000, # default value in DQN paper 
@@ -150,8 +154,10 @@ def deep_q_learing(env,
                   epsilon_start=1.0, 
                   epsilon_end =0.1, 
                   epsilon_decay_step = 1000000, # default value in DQN paper 
-                  action_repeat_times = 1,      # default value in DQN paper is 4; however, in their Lua codes, I did not find this parameter. Therefore, I set this to 1.
-                  update_frequency = 4,
+                  update_freq = 4,
+                  report_freq = 10000,
+                  eval_freq = 10000,
+                  eval_steps = 100000,
                   batch_size=32,
                   record_video_every_episodes=500,
                   
@@ -163,7 +169,7 @@ def deep_q_learing(env,
       env: OpenAI environment
       atari_processor: A AtariProcessor object
       q_estimator: Estimator object used for the Q values
-      num_games: Number of episodes to run for
+      num_episodes: Number of episodes to run for
       replay_memory_size: Size of the replay memory
       replay_memory_init_size: Number of random experiences to sample when initializing 
           the reply memory.
@@ -171,14 +177,17 @@ def deep_q_learing(env,
       epsilon_start: Chance to sample a random action when taking an action.
           Epsilon is decayed over time and this is the start value
       epsilon_end: The final minimum value of epsilon after decaying is done
-      epsilon_decay_steps: Number of steps to decay epsilon over
+      epsilon_decay_steps: Number of total_steps to decay epsilon over
       action_repeat_times: Repeat each action selected by the agent this many times. Use a value of 4 results in 
                             the agent seeing only every 4th input frame
-      update_frequency: The number of actions selected by the agent between successive SGD updates. Using a value of 4
+      update_freq: The number of actions selected by the agent between successive SGD updates. Using a value of 4
                         results in the agent selecting 4 actions between each pair of successive updates. 
+      report_freq: Print the training info after this many total_steps
+      eval_freq:  Evaluate the model by playing a number of games after this many total_steps
+      eval_steps:  Play this many total_steps in evaluting the model, also the number of total_steps in an epoch
       batch_size: Size of batches to sample from the replay memory
       record_video_every_episodes: Record a video every N episodes
-      save_model_every: Save the weights of the model every N steps
+      save_model_every: Save the weights of the model every N total_steps
 
   Returns:
       An plotting.EpisodeStats object with two numpy arrays for episode lengths and episode_rewards
@@ -187,7 +196,6 @@ def deep_q_learing(env,
   # Initialize the replay memory for storing the transitions [state,action,reward,new_state]:
   replay_memory =[]  
 
-
   # Create another q_estimator to be used for computing the q-target. 
   target_estimator = Q_Estimator()
   # target_estimator = clone_model(q_estimator.model)
@@ -195,8 +203,8 @@ def deep_q_learing(env,
 
   # Keeps track of useful statistics
   stats = plotting.EpisodeStats(
-      episode_lengths=np.zeros(num_games),
-      episode_rewards=np.zeros(num_games))
+      episode_lengths=np.zeros(num_episodes),
+      episode_rewards=np.zeros(num_episodes))
 
 
   # Creat the directory for monitoring
@@ -210,21 +218,18 @@ def deep_q_learing(env,
 
   # Initialize the replay_memory using randomly selected actions
   observation = env.reset()
-  state = atari_processor.process_image(observation)
-  state = np.squeeze(np.stack([state]*4,axis=2),axis=3)
+  state = atari_processor.make_initial_state(observation)
   for _ in range(replay_memory_init_size):
     # env.render()
     action = random.sample(VALID_ACTIONS,1)[0]
-    next_observation,reward,game_over,done = env.step(action)
-    next_observation = atari_processor.process_image(next_observation)
-    next_state = np.append(state[:,:,1:],next_observation,axis=2)   # state[:,:,0] corresponds to the oldest frame
+    next_observation,reward,_,done = env.step(action)
+    next_state = atari_processor.make_next_state(state,next_observation) 
     replay_memory.append(Transition(state,action,reward,next_state,done))
     # if done:
     #   print("Lost a life\n")
-    if game_over:
+    if done:
       observation = env.reset()
-      state = atari_processor.process_image(observation)
-      state = np.squeeze(np.stack([state]*4,axis=2),axis=3)
+      state = atari_processor.make_initial_state(observation)
     else:
       state = next_state
 
@@ -233,22 +238,20 @@ def deep_q_learing(env,
   loss = float('inf')
   env = Monitor(env,directory=monitor_path, video_callable=lambda count: count % record_video_every_episodes == 0, resume = True)
   
-
-  action_selections = 0 # Number of action selections so far
   parameter_updates = 0 # Number of parameter updates so far
-  steps = 0             # Number of steps so far 
-  for i_game in range(num_games):
+  total_steps = 0             # Number of total_steps so far 
+  for i_episode in range(num_episodes):
     observation = env.reset()
     state = atari_processor.process_image(observation)
     state = np.squeeze(np.stack([state]*4,axis=2),axis=3)    
-    for _ in itertools.count():
+    for t in itertools.count():
       observation = env.render()
       ############################# Play ################################
       # Epsilon for this time step
-      epsilon = epsilons[min(action_selections, epsilon_decay_step-1)]
+      epsilon = epsilons[min(total_steps, epsilon_decay_step-1)]
 
-      # Update the target estimator after update_target_estimator_every steps
-      if parameter_updates % (update_target_estimator_every) == 0:    
+      # Update the target estimator after update_target_estimator_every total_steps
+      if total_steps % (update_target_estimator_every) == 1:    
         copy_model_parameters(q_estimator,target_estimator)
         print("\nCopied model parameters to target network.")
 
@@ -262,35 +265,24 @@ def deep_q_learing(env,
       # Select an action according to epsilon-greedy policy
       action_probs = policy(np.expand_dims(state,axis=0),epsilon)  # The input to the Conv2D needs to have the shape (sample,rows,cols,channels)
       action = np.random.choice(VALID_ACTIONS,p=action_probs)
-      action_selections +=1
-
-      # Execute the action selected #action_repeat_times# times
-      for _ in range(action_repeat_times):
-        if done:
-          print("Lost a life")
-        next_observation,reward,game_over,done = env.step(action)
-        steps += 1
-        if game_over:
-          break
-      next_observation = atari_processor.process_image(next_observation)
-      next_state = np.append(state[:,:,1:],next_observation,axis=2)
+      
+      next_observation,reward,_,done = env.step(action)
+      total_steps += 1
+      
+      next_state = atari_processor.make_next_state(state,next_observation)
 
       # Pop the first element if the replay_memory is 
       if len(replay_memory) == replay_memory_size:
         replay_memory.pop(0)
       # Save transition to replay memory
-      replay_memory.append(Transition(state,action,reward,next_state,game_over))
+      replay_memory.append(Transition(state,action,reward,next_state,done))
 
       # Update statistics
-      stats.episode_rewards[i_game] +=reward
-      stats.episode_lengths[i_game] = steps
+      stats.episode_rewards[i_episode] +=reward
+      stats.episode_lengths[i_episode] = t
 
-      # Print out which step we're on, useful for debugging.
-      print("Step: {}, Action-Sels: {} @ Game {}/{}, epsilon: {:.4f}, reward: {}, loss: {:.4e} \n".format(
-              steps,action_selections, i_game + 1, num_games, epsilon,stats.episode_rewards[i_game],loss), end="")
-      sys.stdout.flush()
-       
-      if action_selections % 4 == 0:
+           
+      if total_steps % 4 == 0:
         ########################### Learn ###########################
         # Sample a minibatch from the replay_memory 
         samples = random.sample(replay_memory,batch_size)
@@ -308,9 +300,15 @@ def deep_q_learing(env,
         loss = q_estimator.minibatch_update(state_batch,action_batch,target_batch)
         parameter_updates += 1
       
-      if game_over:
-        break
+      # End the episode whenever a life is lost for training
+      if done:
+          break
       state = next_state
+    # Print out which step we're on, useful for debugging.
+    if i_episode % 10 == 0:
+      print("Total Step: {}, Step: {}, Episode {}/{}, epsilon: {:.4f}, reward: {}, loss: {:.4e} \n".format(
+              total_steps, t, i_episode + 1, num_episodes, epsilon,stats.episode_rewards[i_episode],loss), end="")
+      sys.stdout.flush()
   # Save the statistics of the episodes
   # f = open("episode_stats.pickle","wb")
   # pickle.dump(stats,f)
@@ -321,7 +319,7 @@ def deep_q_learing(env,
 def play_with_trained_model(env,
                   atari_processor,
                   q_estimator,
-                  num_games,                  
+                  num_episodes,                  
                   model_file_path,
                   action_repeat_times = 4,
                   record_video_every_episodes=50):
@@ -333,7 +331,7 @@ def play_with_trained_model(env,
       atari_processor: A AtariProcessor object
       q_estimator: Estimator object used for the Q values
       model_file_path: Path of the file storing the model weights
-      num_games: Number of episodes to run for
+      num_episodes: Number of episodes to run for
       action_repeat_times: Repeat each action selected by the agent this many times. Use a value of 4 results in 
                             the agent seeing only every 4th input frame
       record_video_every_episodes: Record a video every N episodes
@@ -349,8 +347,8 @@ def play_with_trained_model(env,
 
   # Keeps track of useful statistics
   stats = plotting.EpisodeStats(
-      episode_lengths=np.zeros(num_games),
-      episode_rewards=np.zeros(num_games))
+      episode_lengths=np.zeros(num_episodes),
+      episode_rewards=np.zeros(num_episodes))
   
   # Creat the directory for monitoring
   # Record videos
@@ -360,15 +358,13 @@ def play_with_trained_model(env,
   # Add env Monitor wrapper
   env = Monitor(env,directory= monitor_path, video_callable=lambda count: count % record_video_every_episodes == 0, resume = True)
 
-  action_selections = 0
-  steps = 0
+  total_steps = 0
   no_ops = 0    # Number of "no fire" actions at the start of an episode (fire is used to start the game)
-  for i_game in range(num_games):
+  for i_episode in range(num_episodes):
     observation = env.reset()
-    state = atari_processor.process_image(observation)
-    state = np.squeeze(np.stack([state]*4,axis=2),axis=3)
-    for _ in itertools.count(): 
-      # if action_selections % 10 == 0:
+    state = atari_processor.make_initial_state(observation)
+    for t in itertools.count(): 
+      # if total_steps % 10 == 0:
       #   _,_,game_over,done= env.step(1) # FIRE to start the game to avoid longlasting pause
       #   if game_over:
       #     break     
@@ -377,17 +373,12 @@ def play_with_trained_model(env,
       # Take one step
       # Select the best action
       q_values = q_estimator.predict(np.expand_dims(state,axis=0))
-      action = np.argmax(q_values)  
-      action_selections +=1
-
-      # Execute the action selected #action_repeat_times# times
-      for _ in range(action_repeat_times):
-        next_observation,reward,game_over,done = env.step(action)
-        steps +=1
-        if game_over:
-          break
-      next_observation = atari_processor.process_image(next_observation)
-      next_state = np.append(state[:,:,1:],next_observation,axis=2)
+      action = np.argmax(q_values)        
+      next_observation,reward,game_over,_ = env.step(action)
+      # In play mode, an episode terminates when all lives are lost
+      if game_over:
+        break
+      next_state = atari_processor.make_next_state(state,next_observation)
 
       # # Execute the action selected
       # next_observation,reward,game_over,done = env.step(action)
@@ -395,18 +386,16 @@ def play_with_trained_model(env,
       # next_state = np.append(state[:,:,1:],next_observation,axis=2)
 
       # Update statistics
-      stats.episode_rewards[i_game] +=reward
-      stats.episode_lengths[i_game] = steps
+      stats.episode_rewards[i_episode] +=reward
+      stats.episode_lengths[i_episode] = total_steps
 
       # Print out which step we're on, useful for debugging.
-      print("Step: {}, Action-Sels: {} @ Episode {}/{}, reward: {}, lives:{}\n".format(
-              steps, action_selections, i_game + 1, num_games, stats.episode_rewards[i_game],env.env.env.env.ale.lives()), end="")
+      print("Total Steps: {}, Steps: {} @ Episode {}/{}, reward: {}, lives:{}\n".format(
+              total_steps, t, i_episode + 1, num_episodes, stats.episode_rewards[i_episode],env.env.env.env.ale.lives()), end="")
       sys.stdout.flush()
       # for debugging
-      if done:
-        print('Lost a life\n')
-
-      if game_over:
+      if game_over:        
+        print('Game Over')
         break
       state = next_state
   return stats
@@ -421,18 +410,17 @@ if task == "train":
   stats = deep_q_learing(env,
                         atari_processor,
                         q_estimator,
-                        num_games=10000,
+                        num_episodes=100000,
                         replay_memory_size = 500000, # To avoid out-of-memory problem, DQN paper: 1 million
                         replay_memory_init_size = 5000, # DQN paper: 50000
                         update_target_estimator_every=5000, # DQN paper: 10000
                         discount_factor =0.99, 
                         epsilon_start=1.0, 
                         epsilon_end =0.1, 
-                        epsilon_decay_step = 100000,  # DQN paper: 1 million
-                        action_repeat_times = 4,
-                        update_frequency = 4,
+                        epsilon_decay_step = 1000000,  # DQN paper: 1 million
+                        update_freq = 4,
                         batch_size=32,
-                        record_video_every_episodes=100)
+                        record_video_every_episodes=1000)
 
   # load the statistics of the episodes
   # f = open("episode_stats.pickle",'rb')
@@ -444,10 +432,14 @@ elif task =="play":
   stats = play_with_trained_model(env,
                                   atari_processor,
                                   q_estimator,
-                                  num_games=2,                                  
-                                  model_file_path="dqn_breakout_weights_back.h5",
+                                  num_episodes=2,                                  
+                                  model_file_path="model-weights/dqn_breakout_weights_back.h5",
                                   action_repeat_times = 1,
                                   record_video_every_episodes=50)
+
+# Plot the episode statistics 
+plotting.plot_episode_stats(stats,smoothing_window=10)
+plt.show()
 
 
 # from gym.utils.play import play

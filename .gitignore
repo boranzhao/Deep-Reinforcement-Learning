@@ -1,0 +1,11 @@
+DQN/.vscode/
+DQN/monitor/
+DQN/monitor-play/
+DQN/Untitled-1.py
+lib/__pycache__/
+DQN/model-weights/dqn_breakout_weights_back*.h5
+
+
+DQN/model-weights/dqn_breakout_weights_back.h5
+DQN/model-weights/dqn_breakout_weights_back_01.h5
+DQN/model-weights/dqn_breakout_weights_back.h5
