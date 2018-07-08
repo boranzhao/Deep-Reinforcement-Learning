@@ -1,6 +1,4 @@
-task= "play"
-
-
+task= "train"
 import gym
 from gym.wrappers import Monitor
 import matplotlib
@@ -30,12 +28,12 @@ from skimage import color, transform, exposure
 matplotlib.style.use('ggplot') # for emulating the aesthetics of ggplot (a popular plotting package for R).
 
 #%% environment
-env = gym.envs.make('Breakout-v4')
+env = gym.envs.make('BreakoutDeterministic-v4')
 
 # wrap the environment so that an episode is done when a life is lost, but the game is still reset after losing all lives
 env = AtariEnvWrapper(env) 
 
-# Atari Actions: 0 (noop), 1 (fire), 2 (right) and 3 (left) 
+# Atari Actions: 0 (noop), 1 (fire), 2 (left) and 3 right 
 VALID_ACTIONS = [0,1,2,3]
 
 class AtariProcessor():
@@ -236,7 +234,7 @@ def deep_q_learing(env,
   # Record videso 
   # Add env Monitor wrapper
   loss = float('inf')
-  env = Monitor(env,directory=monitor_path, video_callable=lambda count: count % record_video_every_episodes == 0, resume = True)
+  env = Monitor(env,directory=monitor_path, video_callable=lambda count: count % record_video_every_episodes == 0)
   
   parameter_updates = 0 # Number of parameter updates so far
   total_steps = 0             # Number of total_steps so far 
@@ -433,7 +431,7 @@ elif task =="play":
                                   atari_processor,
                                   q_estimator,
                                   num_episodes=2,                                  
-                                  model_file_path="model-weights/dqn_breakout_weights_back.h5",
+                                  model_file_path="dqn_breakout_weights_back.h5",
                                   action_repeat_times = 1,
                                   record_video_every_episodes=50)
 
